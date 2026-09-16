@@ -1,0 +1,29 @@
+name: Daily Promo Code Post
+
+on:
+  schedule:
+    # Runs at 9:00 AM IST (03:30 UTC) every day. Edit the cron time as needed.
+    - cron: "30 3 * * *"
+  workflow_dispatch: {}   # lets you also trigger it manually from GitHub UI
+
+jobs:
+  post-codes:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Run promo code poster
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          SHEET_CSV_URL: ${{ secrets.SHEET_CSV_URL }}
+        run: python post_promo_codes.py
