@@ -1,117 +1,223 @@
-"""
-Daily Telegram Promo Code Poster
----------------------------------
-Reads today's promo codes from a public Google Sheet (published as CSV)
-and posts a formatted message to a Telegram channel/group.
+/**
+ * Instant Promo Code Poster — Google Apps Script (Clean Version)
+ * -------------------------------------------------------------
+ * Runs INSIDE your Google Sheet. Fires the moment you type/edit a value in
+ * the "Code" column, and immediately posts to Telegram — no scheduled wait.
+ *
+ * SETUP (one-time):
+ *   1. Open your Sheet → Extensions → Apps Script
+ *   2. Delete any placeholder code, paste this whole file in
+ *   3. Replace BOT_TOKEN and CHAT_ID below with your real values
+ *   4. Save (disk icon)
+ *   5. Left sidebar → clock icon "Triggers" → "+ Add Trigger"
+ *        - Function to run: onCodeEdited
+ *        - Event source: From spreadsheet
+ *        - Event type: On edit
+ *        - Save → authorize when Google asks
+ *   6. Done. Edit any cell in the "Code" column → posts instantly.
+ *
+ * Sheet columns expected (row 1 = header, exact names):
+ *   App Name | Code | Code 2 | App Link | Image URL | Note | Active
+ *
+ * "Code 2" and "Note" are OPTIONAL — leave blank when not needed.
+ */
 
-Setup required (see README.md):
-  1. TELEGRAM_BOT_TOKEN - from @BotFather
-  2. TELEGRAM_CHAT_ID   - your channel's @username or numeric chat id
-  3. SHEET_CSV_URL      - your Google Sheet's "Publish to web" CSV link
+const BOT_TOKEN = "8909843610:AAEnKorvfUslyhLitGyTtGYcXFwqbH0Vi1M";
+const CHAT_ID = "@DailyVaultIN"; // your channel's @username
 
-Sends all active codes as one Telegram "album" (media group) — each app's
-image with its own code + link as the caption underneath, all in a single
-pinnable post.
+function onCodeEdited(e) {
+  if (!e || !e.range) return;
 
-Sheet columns expected (row 1 = header):
-  App Name | Code | Redeem Link | Image URL | Expiry (optional) | Active (TRUE/FALSE)
+  const sheet = e.range.getSheet();
+  const editedCol = e.range.getColumn();
+  const editedRow = e.range.getRow();
 
-Note: Telegram media groups support max 10 items per post — fine for 10 apps.
-If you add more than 10, only the first 10 active rows will be included.
-"""
+  if (editedRow === 1) return; // ignore header row edits
 
-import os
-import sys
-import csv
-import io
-import requests
+  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn())
+    .getValues()[0]
+    .map(h => String(h).trim());
 
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
-SHEET_CSV_URL = os.environ.get("SHEET_CSV_URL")
+  const codeColIndex = headers.indexOf("Code") + 1;
+  if (codeColIndex === 0) return;
 
+  if (editedCol !== codeColIndex) return; // only fire on Code column edits
 
-def fetch_sheet_rows(csv_url: str):
-    """Download the published Google Sheet CSV and return rows as dicts."""
-    resp = requests.get(csv_url, timeout=20)
-    resp.raise_for_status()
-    reader = csv.DictReader(io.StringIO(resp.text))
-    rows = [row for row in reader]
-    return rows
+  const rowValues = sheet.getRange(editedRow, 1, 1, sheet.getLastColumn()).getValues()[0];
+  const row = {};
+  headers.forEach((h, i) => (row[h] = String(rowValues[i] || "").trim()));
 
+  if (!row["Code"]) return;
 
-def get_active_rows(rows, limit=10):
-    active_rows = [
-        r for r in rows
-        if str(r.get("Active", "TRUE")).strip().upper() != "FALSE"
-        and r.get("Code", "").strip()
-    ]
-    return active_rows[:limit]  # Telegram media groups cap at 10 items
+  const active = (row["Active"] || "TRUE").toUpperCase();
+  if (active === "FALSE") return;
 
+  const caption = buildCaption(row);
+  const imageUrl = row["Image URL"];
 
-def build_caption(row, is_first: bool):
-    app = row.get("App Name", "").strip()
-    code = row.get("Code", "").strip()
-    link = row.get("Redeem Link", "").strip()
-    expiry = row.get("Expiry", "").strip()
+  if (imageUrl) {
+    sendPhoto(imageUrl, caption);
+  } else {
+    sendMessage(caption);
+  }
+}
 
-    prefix = "🎮 <b>TODAY'S PROMO CODES</b> 🔥\n\n" if is_first else ""
-    entry = f"{prefix}🕹 <b>{app}</b>\nCode: <code>{code}</code>"
-    if link:
-        entry += f"\n🔗 <a href=\"{link}\">Redeem here</a>"
-    if expiry:
-        entry += f"\n⏳ Valid till: {expiry}"
-    return entry
+function buildCaption(row) {
+  let lines = [];
 
+  lines.push(`<b>App Name:</b> ${escapeHtml(row["App Name"])}`);
+  lines.push(`<b>Promo Code:</b> <code>${escapeHtml(row["Code"])}</code>`);
+  if (row["Code 2"]) {
+    lines.push(`<b>Promo Code 2:</b> <code>${escapeHtml(row["Code 2"])}</code>`);
+  }
+  if (row["App Link"]) {
+    lines.push(`<b>App Link:</b> ${row["App Link"]}`);
+  }
+  if (row["Note"]) {
+    lines.push(`<b>Note:</b> ${escapeHtml(row["Note"])}`);
+  }
 
-def send_album_to_telegram(active_rows):
-    """Send all active codes as one media group (album): image + caption each."""
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMediaGroup"
-    media = []
-    for i, row in enumerate(active_rows):
-        image_url = row.get("Image URL", "").strip()
-        if not image_url:
-            continue  # sendMediaGroup requires every item to have a photo
-        media.append({
-            "type": "photo",
-            "media": image_url,
-            "caption": build_caption(row, is_first=(i == 0)),
-            "parse_mode": "HTML",
-        })
+  return lines.join("\n");
+}
 
-    if not media:
-        return None
+function escapeHtml(text) {
+  return String(text)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
 
-    payload = {"chat_id": TELEGRAM_CHAT_ID, "media": media}
-    resp = requests.post(url, json=payload, timeout=30)
-    resp.raise_for_status()
-    return resp.json()
+function sendPhoto(imageUrl, caption) {
+  const url = `https://api.telegram.org/bot${BOT_TOKEN}/sendPhoto`;
+  const payload = {
+    chat_id: CHAT_ID,
+    photo: imageUrl,
+    caption: caption,
+    parse_mode: "HTML",
+  };
+  callTelegram(url, payload);
+}
 
+function sendMessage(caption) {
+  const url = `https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`;
+  const payload = {
+    chat_id: CHAT_ID,
+    text: caption,
+    parse_mode: "HTML",
+  };
+  callTelegram(url, payload);
+}
 
-def main():
-    missing = [name for name, val in [
-        ("TELEGRAM_BOT_TOKEN", TELEGRAM_BOT_TOKEN),
-        ("TELEGRAM_CHAT_ID", TELEGRAM_CHAT_ID),
-        ("SHEET_CSV_URL", SHEET_CSV_URL),
-    ] if not val]
-    if missing:
-        print(f"ERROR: Missing environment variables: {', '.join(missing)}")
-        sys.exit(1)
+function callTelegram(url, payload) {
+  const options = {
+    method: "post",
+    contentType: "application/json",
+    payload: JSON.stringify(payload),
+    muteHttpExceptions: true,
+  };
+  const response = UrlFetchApp.fetch(url, options);
+  Logger.log(response.getContentText());
+}
 
-    rows = fetch_sheet_rows(SHEET_CSV_URL)
-    active_rows = get_active_rows(rows)
+/* ============================================================
+ * SOURCE CHANNEL AUTO-MONITOR
+ * ------------------------------------------------------------
+ * Checks a public Telegram channel's preview page (t.me/s/...)
+ * every few minutes for new posts matching the template:
+ *
+ *   <emoji> APPNAME New PromoCode
+ *   Claim > claimlink.com
+ *   App Link 👉
+ *   https://applink.com/?code=XXXX&t=...
+ *
+ * When a new matching post is found, it auto-extracts App Name,
+ * Code (from the ?code= in the App Link) and App Link, then
+ * posts it to YOUR channel automatically — no manual step.
+ *
+ * SETUP:
+ *   1. Set SOURCE_CHANNEL below (just the @username, no t.me/)
+ *   2. Triggers → + Add Trigger → function: checkSourceChannel
+ *      Event source: Time-driven → Minutes timer → Every 10 minutes
+ *   3. Save. Done — it now runs automatically forever.
+ * ============================================================ */
 
-    if not active_rows:
-        print("No active promo codes found today. Nothing posted.")
-        return
+const SOURCE_CHANNEL = "allyonocodewala"; // no @, no t.me/
 
-    result = send_album_to_telegram(active_rows)
-    if result is None:
-        print("No rows had an Image URL — nothing posted. Add images to the sheet.")
-        return
+function checkSourceChannel() {
+  const url = `https://t.me/s/${SOURCE_CHANNEL}`;
+  const response = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
+  const html = response.getContentText();
 
-    print("Posted successfully:", result.get("ok"))
+  const props = PropertiesService.getScriptProperties();
+  const lastId = parseInt(props.getProperty("LAST_SOURCE_ID_" + SOURCE_CHANNEL) || "0", 10);
 
+  // Find each message block: data-post="channel/12345" ... message text div
+  const blockRegex = new RegExp(
+    `data-post="${SOURCE_CHANNEL}\\/(\\d+)"[\\s\\S]*?class="tgme_widget_message_text[^"]*"[^>]*>([\\s\\S]*?)<\\/div>`,
+    "g"
+  );
 
-if __name__ == "__main__":
-    main()
+  let match;
+  let maxIdSeen = lastId;
+  const newPosts = [];
+
+  while ((match = blockRegex.exec(html)) !== null) {
+    const postId = parseInt(match[1], 10);
+    if (postId <= lastId) continue;
+
+    const rawHtml = match[2];
+    const text = rawHtml
+      .replace(/<br\s*\/?>/gi, "\n")
+      .replace(/<[^>]+>/g, "")
+      .replace(/&amp;/g, "&")
+      .replace(/&lt;/g, "<")
+      .replace(/&gt;/g, ">")
+      .trim();
+
+    newPosts.push({ id: postId, text: text });
+    if (postId > maxIdSeen) maxIdSeen = postId;
+  }
+
+  // Process oldest-first so channel order stays correct
+  newPosts.sort((a, b) => a.id - b.id);
+
+  newPosts.forEach(post => {
+    const parsed = parseSourceMessage(post.text);
+    if (parsed) {
+      const caption = buildCaption({
+        "App Name": parsed.appName,
+        "Code": parsed.code,
+        "App Link": parsed.appLink,
+      });
+      sendMessage(caption);
+    } else {
+      Logger.log("Skipped (did not match template): " + post.text.substring(0, 80));
+    }
+  });
+
+  if (maxIdSeen > lastId) {
+    props.setProperty("LAST_SOURCE_ID_" + SOURCE_CHANNEL, String(maxIdSeen));
+  }
+}
+
+function parseSourceMessage(text) {
+  // Expected shape:
+  //   <emoji> APPNAME New PromoCode
+  //   Claim > something
+  //   App Link 👉
+  //   https://.../?code=XXXX&t=...
+  const appNameMatch = text.match(/([A-Za-z0-9\-\.]+)\s+New\s*PromoCode/i);
+  const appLinkMatch = text.match(/(https?:\/\/\S+)/i);
+
+  if (!appNameMatch || !appLinkMatch) return null;
+
+  const appLink = appLinkMatch[1];
+  const codeMatch = appLink.match(/[?&]code=([^&\s]+)/i);
+  if (!codeMatch) return null;
+
+  return {
+    appName: appNameMatch[1],
+    code: decodeURIComponent(codeMatch[1]),
+    appLink: appLink,
+  };
+}
